@@ -1,0 +1,13 @@
+
+
+Customer: Hello, I am calling from Mumbai. I want to inquire about the Kotak Home Loan.
+    Representative: Good morning! Welcome to Kotak Mahindra Bank. I am Rajesh. How can I assist you with your home loan query today?
+    Customer: I am looking for a loan of approximately 50 lakhs for a new apartment. What are the current interest rates?
+    Representative: Currently, our home loan interest rates start from 8.75% per annum, depending on your credit score and financial profile.
+    Customer: That sounds competitive. What documents would I need to submit? I am a salaried professional.
+    Representative: Since you are salaried, you would need your last 3 months' salary slips, 6 months' bank statements, and your latest Form 16. I can also arrange a callback from our loan specialist to guide you through the digital application process.
+    Customer: Yes, please arrange a callback. I would like to get this started as soon as possible as the builder is asking for the down payment.
+    Representative: Certainly. I have noted your request for a callback. A specialist will reach out to you within the next 4 working hours. Is there anything else I can help you with?
+    Customer: No, that's it for now. Thank you, Rajesh.
+    Representative: You're welcome! Thank you for choosing Kotak Mahindra Bank. Have a great day!
+    

@@ -1,0 +1,17 @@
+# Core dependencies
+faster-whisper==1.0.3
+torch==2.1.0
+transformers==4.36.0
+numpy==1.24.3
+scipy==1.11.4
+
+# Optional: for GPU support (uncomment if you have CUDA)
+# torch==2.1.0+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+
+# Audio processing
+soundfile==0.12.1
+librosa==0.10.1
+
+# Utilities
+tqdm==4.66.1
+pandas==2.1.4
