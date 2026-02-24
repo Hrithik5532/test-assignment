@@ -187,7 +187,7 @@ class CallAnalyzer:
             'empathy_score': self._score_empathy(transcript, customer_sentiment)
         }
         
-        agent_score = np.mean(list(scores.values())) * 100
+        agent_score = float(np.mean(list(scores.values())) * 100)
         
         print(f"   Overall Score: {agent_score:.1f}/100")
         print(f"   - Politeness: {scores['politeness_score']*100:.1f}")
@@ -217,7 +217,7 @@ class CallAnalyzer:
     
     def _score_clarity(self, text: str) -> float:
         sentences = text.split('.')
-        avg_length = np.mean([len(s.split()) for s in sentences if s.strip()])
+        avg_length = float(np.mean([len(s.split()) for s in sentences if s.strip()]))
         if 10 <= avg_length <= 20:
             return 1.0
         elif avg_length < 10:

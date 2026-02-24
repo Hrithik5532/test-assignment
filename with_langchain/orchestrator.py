@@ -25,7 +25,7 @@ class AnalysisResult(BaseModel):
     primary_intent: str = Field(..., description="The main purpose of the call")
     sentiment: str = Field(..., description="Overall customer sentiment (Positive/Negative/Neutral)")
     tone: str = Field(..., description="The emotional tone of the speaker (e.g., Polite, Frustrated)")
-    conversation_rating: int = Field(..., ge=1, le=10, description="Overall conversation quality score (1-10)")
+    conversation_rating: float = Field(..., ge=0, le=1, description="Overall conversation quality score (0-1)")
     need_callback: bool = Field(..., description="True if the customer requested or needs a callback")
     escalation_required: bool = Field(..., description="True if the issue requires supervisor intervention")
     fraud_risk: bool = Field(..., description="True if suspicious keywords or behavior suggest fraud")
@@ -319,7 +319,7 @@ class CallAnalysisOrchestrator:
         json_data = {
             "sentiment": sent['sentiment'].capitalize(),
             "tone": "Professional",
-            "conversation_rating": int(score_details['overall_score'] / 1),
+            "conversation_rating": float(score_details['overall_score'] / 100.0),
             "need_callback": any(r['type'] == 'callback_request' for r in reqs),
             "escalation_required": any(r['type'] == 'escalation' for r in reqs),
             "fraud_risk": intent['intent'] == 'fraud_report',
