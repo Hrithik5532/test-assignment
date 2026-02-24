@@ -2,7 +2,6 @@
 
 import os
 import json
-import sqlite3
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import warnings
@@ -15,10 +14,13 @@ import torch
 
 import numpy as np
 
+from db_utils import get_connection, setup_database
+from s3_utils import upload_file_to_s3, download_file_from_s3
+
 
 class CallAnalyzer:
     
-    def __init__(self, db_path="calls_database.db"):
+    def __init__(self):
         
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
@@ -45,61 +47,10 @@ class CallAnalyzer:
             top_k=None
         )
         
-        self.db_path = db_path
-        self.setup_database()
+        # Initialize PostgreSQL tables
+        setup_database()
         
         print("System initialization complete!\n")
-    
-    def setup_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS calls (
-                call_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                audio_file TEXT,
-                transcript TEXT,
-                intent TEXT,
-                intent_confidence REAL,
-                sentiment TEXT,
-                sentiment_score REAL,
-                emotion TEXT,
-                emotion_score REAL,
-                agent_score REAL,
-                call_duration REAL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tickets (
-                ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                call_id INTEGER,
-                requirement_type TEXT,
-                description TEXT,
-                priority TEXT,
-                status TEXT DEFAULT 'OPEN',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (call_id) REFERENCES calls (call_id)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS agent_responses (
-                response_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                call_id INTEGER,
-                agent_text TEXT,
-                politeness_score REAL,
-                helpfulness_score REAL,
-                clarity_score REAL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (call_id) REFERENCES calls (call_id)
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        print("Database initialized")
     
     def audio_to_text(self, audio_file: str) -> Tuple[str, float]:
         print(f"\nTranscribing: {audio_file}")
@@ -285,11 +236,14 @@ class CallAnalyzer:
         
         return min(count / 3, 1.0)
     
+    # -----------------------------------------------------------------------
+    # Database operations (PostgreSQL via db_utils)
+    # -----------------------------------------------------------------------
     def save_to_database(self, call_data: Dict, requirements: List[Dict], 
                         agent_data: Dict) -> int:
         print("\nSaving to database...")
         
-        conn = sqlite3.connect(self.db_path)
+        conn = get_connection()
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -297,7 +251,8 @@ class CallAnalyzer:
                 audio_file, transcript, intent, intent_confidence,
                 sentiment, sentiment_score, emotion, emotion_score,
                 agent_score, call_duration
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING call_id
         ''', (
             call_data['audio_file'],
             call_data['transcript'],
@@ -311,19 +266,19 @@ class CallAnalyzer:
             call_data['duration']
         ))
         
-        call_id = cursor.lastrowid
+        call_id = cursor.fetchone()[0]
         
         for req in requirements:
             cursor.execute('''
                 INSERT INTO tickets (call_id, requirement_type, description, priority)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
             ''', (call_id, req['type'], req['description'], req['priority']))
         
         cursor.execute('''
             INSERT INTO agent_responses (
                 call_id, agent_text, politeness_score, 
                 helpfulness_score, clarity_score
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s)
         ''', (
             call_id,
             agent_data['agent_text'],
@@ -333,6 +288,7 @@ class CallAnalyzer:
         ))
         
         conn.commit()
+        cursor.close()
         conn.close()
         
         print(f"   Call ID: {call_id}")
@@ -344,15 +300,15 @@ class CallAnalyzer:
                        agent_data: Dict):
         print(f"\nUpdating database for Call ID: {call_id}...")
         
-        conn = sqlite3.connect(self.db_path)
+        conn = get_connection()
         cursor = conn.cursor()
         
         cursor.execute('''
             UPDATE calls SET 
-                intent = ?, intent_confidence = ?,
-                sentiment = ?, sentiment_score = ?, emotion = ?, emotion_score = ?,
-                agent_score = ?, call_duration = ?
-            WHERE call_id = ?
+                intent = %s, intent_confidence = %s,
+                sentiment = %s, sentiment_score = %s, emotion = %s, emotion_score = %s,
+                agent_score = %s, call_duration = %s
+            WHERE call_id = %s
         ''', (
             call_data['intent'],
             call_data['intent_confidence'],
@@ -365,21 +321,20 @@ class CallAnalyzer:
             call_id
         ))
         
-        # Clean up old tickets and responses for this call_id to avoid duplicates if re-processed
-        cursor.execute("DELETE FROM tickets WHERE call_id = ?", (call_id,))
-        cursor.execute("DELETE FROM agent_responses WHERE call_id = ?", (call_id,))
+        cursor.execute("DELETE FROM tickets WHERE call_id = %s", (call_id,))
+        cursor.execute("DELETE FROM agent_responses WHERE call_id = %s", (call_id,))
         
         for req in requirements:
             cursor.execute('''
                 INSERT INTO tickets (call_id, requirement_type, description, priority)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
             ''', (call_id, req['type'], req['description'], req['priority']))
         
         cursor.execute('''
             INSERT INTO agent_responses (
                 call_id, agent_text, politeness_score, 
                 helpfulness_score, clarity_score
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s)
         ''', (
             call_id,
             agent_data['agent_text'],
@@ -389,6 +344,7 @@ class CallAnalyzer:
         ))
         
         conn.commit()
+        cursor.close()
         conn.close()
         print(f"   Database updated successfully for ID: {call_id}")
 
@@ -434,16 +390,26 @@ class CallAnalyzer:
         return summary
 
     def process_audio_file(self, audio_file: str) -> Dict:
+        """
+        Process an audio file.
+        If the path is an S3 key (starts with 'raw-audio/' etc.), it is
+        downloaded to /tmp first. Otherwise the local path is used directly.
+        """
         print(f"\n{'='*60}")
         print(f" PROCESSING: {os.path.basename(audio_file)}")
         print(f"{'='*60}")
         
-        transcript, duration = self.audio_to_text(audio_file)
+        # If audio_file looks like an S3 key, download it first
+        local_path = audio_file
+        s3_key = None
+        if audio_file.startswith(("raw-audio/", "processed-audio/", "s3://")):
+            s3_key = audio_file.replace("s3://test-interview-audio/", "")
+            local_path = download_file_from_s3(s3_key)
+        
+        transcript, duration = self.audio_to_text(local_path)
         
         intent_result = self.classify_intent(transcript)
-        
         requirements = self.detect_requirements(transcript, intent_result['intent'])
-        
         sentiment_result = self.analyze_sentiment_and_tone(transcript)
         
         agent_result = self.rate_agent_response(
@@ -452,7 +418,7 @@ class CallAnalyzer:
         )
         
         call_data = {
-            'audio_file': audio_file,
+            'audio_file': s3_key or audio_file,
             'transcript': transcript,
             'intent': intent_result['intent'],
             'intent_confidence': intent_result['confidence'],
@@ -468,7 +434,7 @@ class CallAnalyzer:
         
         summary = {
             'call_id': call_id,
-            'audio_file': audio_file,
+            'audio_file': s3_key or audio_file,
             'transcript': transcript,
             'intent': intent_result,
             'sentiment': sentiment_result,
@@ -498,17 +464,17 @@ class CallAnalyzer:
         return results
     
     def generate_report(self, call_id: int = None):
-        conn = sqlite3.connect(self.db_path)
+        conn = get_connection()
         cursor = conn.cursor()
         
         if call_id:
-            cursor.execute('SELECT * FROM calls WHERE call_id = ?', (call_id,))
+            cursor.execute('SELECT * FROM calls WHERE call_id = %s', (call_id,))
             call = cursor.fetchone()
             
-            cursor.execute('SELECT * FROM tickets WHERE call_id = ?', (call_id,))
+            cursor.execute('SELECT * FROM tickets WHERE call_id = %s', (call_id,))
             tickets = cursor.fetchall()
             
-            cursor.execute('SELECT * FROM agent_responses WHERE call_id = ?', (call_id,))
+            cursor.execute('SELECT * FROM agent_responses WHERE call_id = %s', (call_id,))
             agent = cursor.fetchone()
             
             print(f"\n{'='*60}")
@@ -529,84 +495,17 @@ class CallAnalyzer:
             cursor.execute('SELECT AVG(agent_score) FROM calls')
             avg_score = cursor.fetchone()[0]
             
-            cursor.execute('SELECT COUNT(*) FROM tickets WHERE status = "OPEN"')
+            cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'OPEN'")
             open_tickets = cursor.fetchone()[0]
             
             print(f"\n{'='*60}")
             print(f" OVERALL STATISTICS")
             print(f"{'='*60}")
             print(f"Total Calls Analyzed: {total_calls}")
-            print(f"Average Agent Score: {avg_score:.1f}/100")
+            print(f"Average Agent Score: {avg_score:.1f}/100" if avg_score else "Average Agent Score: N/A")
             print(f"Open Tickets: {open_tickets}")
         
+        cursor.close()
         conn.close()
 
 
-def main():
-    
-    analyzer = CallAnalyzer()
-    
-    audio_files = [
-    ]
-    
-    print("\n" + "="*60)
-    print(" DEMO MODE: Simulating with sample transcript")
-    print("="*60)
-    
-    sample_transcript = """
-   Agent: We need to verify your employment details.
-Caller: I work at Infosys as a senior manager.
-Agent: Since when?
-Caller: Around 3 years… maybe 4.
-Agent: Can you confirm your official email ID?
-Caller: I use a personal Gmail mostly.
-Agent: Our records show no credit history under your PAN.
-Caller: I recently moved back to India. That’s why.
-Agent: Can you share Form 16?
-Caller: I don’t have it right now. Can we skip that?
-
-
-"""
-    
-    print("\n Testing Intent Classification...")
-    intent_result = analyzer.classify_intent(sample_transcript)
-    
-    print("\n Testing Requirement Detection...")
-    requirements = analyzer.detect_requirements(sample_transcript, intent_result['intent'])
-    
-    print("\n Testing Sentiment Analysis...")
-    sentiment_result = analyzer.analyze_sentiment_and_tone(sample_transcript)
-    
-    print("\n Testing Agent Rating...")
-    agent_result = analyzer.rate_agent_response(
-        sample_transcript, 
-        sentiment_result['sentiment']
-    )
-    
-    call_data = {
-        'audio_file': 'demo_call.wav',
-        'transcript': sample_transcript,
-        'intent': intent_result['intent'],
-        'intent_confidence': intent_result['confidence'],
-        'sentiment': sentiment_result['sentiment'],
-        'sentiment_score': sentiment_result['sentiment_score'],
-        'emotion': sentiment_result['emotion'],
-        'emotion_score': sentiment_result['emotion_score'],
-        'agent_score': agent_result['agent_score'],
-        'duration': 120.0
-    }
-    
-    call_id = analyzer.save_to_database(call_data, requirements, agent_result)
-    
-    analyzer.generate_report(call_id)
-    analyzer.generate_report()
-    
-    print("\nDemo completed successfully!")
-    print(f" Database created: {analyzer.db_path}")
-    print("\nTo process real audio files, use:")
-    print("  analyzer.process_audio_file('your_audio.wav')")
-    print("  analyzer.process_multiple_files(['file1.wav', 'file2.mp3'])")
-
-
-if __name__ == "__main__":
-    main()

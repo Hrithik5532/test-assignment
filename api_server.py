@@ -2,26 +2,45 @@
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import shutil
 import os
 from datetime import datetime
-import sqlite3
+
+from mangum import Mangum
 
 from call_analyzer import CallAnalyzer
+from db_utils import get_connection
+from s3_utils import upload_file_to_s3, get_s3_url
 
+# ---------------------------------------------------------------------------
+# FastAPI App
+# ---------------------------------------------------------------------------
 app = FastAPI(
     title="Banking Call Center Analysis API",
     description="AI-powered call analysis for banking customer service",
-    version="1.0.0"
+    version="2.0.0"
 )
 
-analyzer = CallAnalyzer(db_path="production_calls.db")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-UPLOAD_DIR = "uploaded_audio"
+# On Lambda, writable dir is /tmp only
+UPLOAD_DIR = "/tmp/uploaded_audio"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+analyzer = CallAnalyzer()
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
 
 class CallAnalysisResponse(BaseModel):
     call_id: int
@@ -44,13 +63,16 @@ class TicketResponse(BaseModel):
     priority: str
     status: str
 
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/")
 async def root():
     return {
         "status": "online",
         "service": "Banking Call Analysis API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "timestamp": datetime.now().isoformat()
     }
 
@@ -58,10 +80,15 @@ async def root():
 @app.post("/analyze/audio", response_model=CallAnalysisResponse)
 async def analyze_audio(file: UploadFile = File(...)):
     try:
+        # 1. Save upload to /tmp
         file_path = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
+        # 2. Upload to S3 (raw-audio prefix)
+        s3_key = upload_file_to_s3(file_path, prefix="raw-audio/")
+        
+        # 3. Process the local copy
         result = analyzer.process_audio_file(file_path)
         
         return CallAnalysisResponse(
@@ -91,12 +118,16 @@ async def analyze_batch(files: List[UploadFile] = File(...)):
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             
+            # Upload to S3
+            s3_key = upload_file_to_s3(file_path, prefix="raw-audio/")
+            
             result = analyzer.process_audio_file(file_path)
             results.append({
                 "filename": file.filename,
                 "call_id": result['call_id'],
                 "intent": result['intent']['intent'],
-                "agent_score": result['agent_performance']['agent_score']
+                "agent_score": result['agent_performance']['agent_score'],
+                "s3_key": s3_key
             })
             
         except Exception as e:
@@ -110,21 +141,24 @@ async def analyze_batch(files: List[UploadFile] = File(...)):
 
 @app.get("/calls/{call_id}")
 async def get_call(call_id: int):
-    conn = sqlite3.connect(analyzer.db_path)
+    conn = get_connection()
     cursor = conn.cursor()
     
-    cursor.execute('SELECT * FROM calls WHERE call_id = ?', (call_id,))
+    cursor.execute('SELECT * FROM calls WHERE call_id = %s', (call_id,))
     call = cursor.fetchone()
     
     if not call:
+        cursor.close()
+        conn.close()
         raise HTTPException(status_code=404, detail="Call not found")
     
-    cursor.execute('SELECT * FROM tickets WHERE call_id = ?', (call_id,))
+    cursor.execute('SELECT * FROM tickets WHERE call_id = %s', (call_id,))
     tickets = cursor.fetchall()
     
-    cursor.execute('SELECT * FROM agent_responses WHERE call_id = ?', (call_id,))
+    cursor.execute('SELECT * FROM agent_responses WHERE call_id = %s', (call_id,))
     agent = cursor.fetchone()
     
+    cursor.close()
     conn.close()
     
     return {
@@ -149,7 +183,7 @@ async def get_call(call_id: int):
 
 @app.get("/tickets/open", response_model=List[TicketResponse])
 async def get_open_tickets():
-    conn = sqlite3.connect(analyzer.db_path)
+    conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -160,6 +194,7 @@ async def get_open_tickets():
     ''')
     
     tickets = cursor.fetchall()
+    cursor.close()
     conn.close()
     
     return [
@@ -176,18 +211,21 @@ async def get_open_tickets():
 
 @app.put("/tickets/{ticket_id}/close")
 async def close_ticket(ticket_id: int):
-    conn = sqlite3.connect(analyzer.db_path)
+    conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute(
-        'UPDATE tickets SET status = ? WHERE ticket_id = ?',
+        'UPDATE tickets SET status = %s WHERE ticket_id = %s',
         ('CLOSED', ticket_id)
     )
     
     if cursor.rowcount == 0:
+        cursor.close()
+        conn.close()
         raise HTTPException(status_code=404, detail="Ticket not found")
     
     conn.commit()
+    cursor.close()
     conn.close()
     
     return {"message": f"Ticket {ticket_id} closed successfully"}
@@ -195,7 +233,7 @@ async def close_ticket(ticket_id: int):
 
 @app.get("/stats/overall")
 async def get_overall_stats():
-    conn = sqlite3.connect(analyzer.db_path)
+    conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute('SELECT COUNT(*) FROM calls')
@@ -204,7 +242,7 @@ async def get_overall_stats():
     cursor.execute('SELECT AVG(agent_score) FROM calls')
     avg_score = cursor.fetchone()[0] or 0
     
-    cursor.execute('SELECT COUNT(*) FROM tickets WHERE status = "OPEN"')
+    cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'OPEN'")
     open_tickets = cursor.fetchone()[0]
     
     cursor.execute('''
@@ -223,6 +261,7 @@ async def get_overall_stats():
     ''')
     top_intents = [{"intent": row[0], "count": row[1]} for row in cursor.fetchall()]
     
+    cursor.close()
     conn.close()
     
     return {
@@ -236,7 +275,7 @@ async def get_overall_stats():
 
 @app.get("/stats/agent-performance")
 async def get_agent_performance():
-    conn = sqlite3.connect(analyzer.db_path)
+    conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -248,6 +287,7 @@ async def get_agent_performance():
     ''')
     
     scores = cursor.fetchone()
+    cursor.close()
     conn.close()
     
     return {
@@ -257,8 +297,15 @@ async def get_agent_performance():
     }
 
 
+# ---------------------------------------------------------------------------
+# Lambda handler (via Mangum)
+# ---------------------------------------------------------------------------
+handler = Mangum(app, lifespan="off")
+
+
+# ---------------------------------------------------------------------------
+# Local dev server
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    
-    
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8009)

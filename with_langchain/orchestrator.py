@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from pathlib import Path
 
-from langchain_ollama import ChatOllama
+from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
@@ -167,16 +167,25 @@ def save_to_database(
 # ==================== ORCHESTRATOR ====================
 
 class CallAnalysisOrchestrator:
-    def __init__(self, model_name: str = "qwen3"):
-        logger.info(f"Initializing CallAnalysisOrchestrator with Ollama model: {model_name}")
+    def __init__(self, model_name: str):
+        logger.info(f"Initializing CallAnalysisOrchestrator with Azure model: {model_name}")
         
-        # Initialize Ollama model
+        # Initialize Azure model
         try:
-            self.model = ChatOllama(
-                model=model_name,
+            # self.model = ChatOllama(
+            #     model=model_name,
+            #     temperature=0,
+            # )
+            # logger.info(f"Ollama {model_name} initialized successfully")
+
+            self.model = AzureChatOpenAI(
+                azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", model_name),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
                 temperature=0,
             )
-            logger.info(f"Ollama {model_name} initialized successfully")
+            logger.info(f"Azure {model_name} initialized successfully")
         except Exception as e:
             logger.warning(f"Could not initialize Ollama: {str(e)}. Fallback methods will be used via tools.")
             self.model = None
@@ -214,7 +223,7 @@ class CallAnalysisOrchestrator:
             "primary_intent": "string",
             "sentiment": "Positive" | "Negative" | "Neutral",
             "tone": "string",
-            "conversation_rating": 1-10,
+            "conversation_rating": 0-1,
             "need_callback": true | false,
             "escalation_required": true | false,
             "fraud_risk": true | false,
@@ -310,7 +319,7 @@ class CallAnalysisOrchestrator:
         json_data = {
             "sentiment": sent['sentiment'].capitalize(),
             "tone": "Professional",
-            "conversation_rating": int(score_details['overall_score'] / 10),
+            "conversation_rating": int(score_details['overall_score'] / 1),
             "need_callback": any(r['type'] == 'callback_request' for r in reqs),
             "escalation_required": any(r['type'] == 'escalation' for r in reqs),
             "fraud_risk": intent['intent'] == 'fraud_report',
