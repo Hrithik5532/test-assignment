@@ -6,16 +6,31 @@ RUN yum install -y \
     gcc-c++ \
     make \
     cmake \
-    ffmpeg \
     pkgconfig \
-    python3-devel
+    python3-devel \
+    xz \
+    tar
 
-# Copy project files
-COPY . ${LAMBDA_TASK_ROOT}
+# Install static FFmpeg for ARM64
+RUN curl -LO https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz && \
+    tar -xJf ffmpeg-release-arm64-static.tar.xz && \
+    mv ffmpeg-*-arm64-static/ffmpeg /usr/local/bin/ && \
+    mv ffmpeg-*-arm64-static/ffprobe /usr/local/bin/ && \
+    rm -rf ffmpeg-release-arm64-static.tar.xz ffmpeg-*-arm64-static
 
-# Install Python dependencies
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+# Copy requirements first (for Docker caching)
+COPY requirements.txt .
+
+# Upgrade pip
 RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
 
-# Set handler
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Lambda handler
 CMD ["api_main.handler"]
